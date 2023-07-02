@@ -20,18 +20,12 @@ import HiwonderSDK.FourInfrared as FourInfrared
 import imageio.v3 as iio
 
 ##################################################
-# Wall Tap
+# SLAM Map
 #
-# This routine slows the robot down as it approaches a wall
-# using a proportional controller that will cause the robot
-# to gently tap the wall before stopping.
-#
-# The robot will turn its camera to the right and take
-# a sequence of photos as it moves. When it stops the
-# robot will stitch the photos together into a gif movie.
-#
-# Along the way the robot will count the number of
-# black lines it crosses over.
+# This routine measures the distance to a feature wall
+# running alongside the path of the robot. At the same
+# time, the robot tracks its location by detecting the
+# black tape stripes crossing the robot's path.
 #
 ##################################################
 
@@ -51,20 +45,19 @@ SERVO_DEFAULT_POSITION = 1500 # The default 90-degree position for both camera s
 SERVO_HARD_RIGHT_POSITION = 500 # Pulse Width = Angle-in-degrees * 11.1 + 500 - turn the camera servo hard-right
 SERVO_HARD_LEFT_POSITION = 2500 # Turn the camera servo hard-left = 180 * 11.1 + 500
 MAX_DISTANCE_THRESHOLD = 100.0 # cm - if greater distance_mean away from the wall than this run at full speed
-MAX_SPEED = 100.0 # mm/second - the maximum speed the robot can travel
+MAX_SPEED = 50.0 # mm/second - the maximum speed the robot can travel
 MIN_DISTANCE_THRESHOLD = 5.0 # cm - if distance_mean to the wall is closer than this then stop the robot
-MIN_SPEED = 25.0 # mm/second - the minimum speed the robot can travel if not stopping
-PID_PROPORTIONAL_COEFFICIENT = 2.0 # Multiply the distance_mean from the wall by this coefficient
+MIN_SPEED = 40.0 # mm/second - the minimum speed the robot can travel if not stopping
+MAX_LINE_COUNT = 7 # stop the robot after detecting this many lines across the track
 
 servo1_default_position = SERVO_DEFAULT_POSITION # These defaults will be updated by the fine tuning found in the YAML file
 servo2_default_position = SERVO_DEFAULT_POSITION
-distance_mean = MAX_DISTANCE_THRESHOLD # cm - the mean distance to the wall
-distance_last = MAX_DISTANCE_THRESHOLD # cm - distances can only decrease as the wall approaches
-distance_list = []
+distance_list = [] # List of distance measurements to the feature wall
+landmark_list = [] # List of distance offsets when a landmark line is detected
 line_latched = False # Latched True if any of the infrared sensors detect a line
 line_detected = False # True for a single scan when a line is detected
 line_count = 0 # Count the number of lines detected by the robot as it runs
-speed = MAX_SPEED
+speed = MAX_SPEED # The robot runs at a constant minimim speed
 
 robot = mecanum.MecanumChassis()
 sonar = Sonar.Sonar()
@@ -116,11 +109,11 @@ def initialize():
     servo2_default_position = servo_data['servo2']
 
     # Prepare to move the camera into position to take a sequence of images
-    if DEBUG: print(f'[initialize] Board.setPWMServoPulse(2, {SERVO_HARD_RIGHT_POSITION}, 1000)')
-    Board.setPWMServoPulse(2, SERVO_HARD_RIGHT_POSITION, 1000) # 500 = 0-degrees * 11.1 + 500 = point camera hard-right
+    if DEBUG: print(f'[initialize] Board.setPWMServoPulse(2, {servo2_default_position}, 1000)')
+    Board.setPWMServoPulse(2, servo2_default_position, 1000) # 500 = 0-degrees * 11.1 + 500 = point camera hard-right
     time.sleep(0.3)
-    if DEBUG: print(f'[initialize] Board.setPWMServoPulse(2, {SERVO_HARD_RIGHT_POSITION}, 1000)')
-    Board.setPWMServoPulse(2, SERVO_HARD_RIGHT_POSITION, 1000) # 500 = 0-degrees * 11.1 + 500 = point camera hard-right
+    if DEBUG: print(f'[initialize] Board.setPWMServoPulse(2, {servo2_default_position}, 1000)')
+    Board.setPWMServoPulse(2, servo2_default_position, 1000) # 500 = 0-degrees * 11.1 + 500 = point camera hard-right
     time.sleep(1) # Move 1000 ms = 1 second
 
     # Turn the camera on
@@ -137,30 +130,24 @@ def initialize():
 # Move the robot each iteration - this routine runs independently in a thread
 def move():
     global is_running
-    global distance_mean
+    global line_count
 
     if DEBUG: print("[move]")
     while True:
-        if is_running:
-            if math.isnan(distance_mean):
-                continue
-            if distance_mean > MAX_DISTANCE_THRESHOLD:
-                speed = MAX_SPEED
-            elif distance_mean <= MIN_DISTANCE_THRESHOLD:
-                is_running = False
-                speed = 0.0
-            else:
-                speed = min( max(distance_mean * PID_PROPORTIONAL_COEFFICIENT, MIN_SPEED), MAX_SPEED )
+        if is_running and line_count == 0:
+            speed = MAX_SPEED
+        elif is_running and line_count < MAX_LINE_COUNT:
+            speed = MIN_SPEED
         else:
+            is_running = False
             speed = 0.0
         if False and DEBUG: print(f'[move] robot.set_velocity({speed:.1f}, 90, 0)')
         robot.set_velocity(speed, 90, 0)
 
 # Calculate the distance_mean from the robot to the wall
 def run(camera_image):
-    global distance_mean
-    global distance_last
     global distance_list
+    global landmark_list
     global line_latched
     global line_detected
     global line_count
@@ -187,22 +174,13 @@ def run(camera_image):
         line_count += 1
         if DEBUG: print(f'[run] line_count={line_count}')
 
-    # Ignore bad sensor measurements if the wall is getting further away 
-    if distance_sensor <= MAX_DISTANCE_THRESHOLD: # distance_last
-        distance_last = distance_sensor
+    # Collect measurements to the feature wall and offsets to landmarks
+    if line_count > 0:
+        if line_detected:
+            landmark_list.append( len(distance_list) )
         distance_list.append(distance_sensor)
-        dataframe = pd.DataFrame(distance_list)
-        dataframe_ = dataframe.copy()
-        mu = dataframe_.mean()
-        std = dataframe_.std()
 
-        data_clean = dataframe[np.abs(dataframe - mu) <= std]
-        distance_mean = data_clean.mean()[0]
-
-        if len(distance_list) >= 5:
-            distance_list.remove(distance_list[0])
-
-    return cv2.putText(camera_image, f'Dist:{distance_mean:.1f}cm Line:{line_count}', (30, 480-30), cv2.FONT_HERSHEY_SIMPLEX, 1.2, IMAGE_TEXT_COLOR, 2)  # Update the camera image
+    return cv2.putText(camera_image, f'Dist:{distance_sensor:.1f}cm Line:{line_count}', (30, 480-30), cv2.FONT_HERSHEY_SIMPLEX, 1.2, IMAGE_TEXT_COLOR, 2)  # Update the camera image
 
 # Stop the robot and restore defaults
 def stop():
@@ -309,5 +287,5 @@ if __name__ == '__main__':
     if DEBUG: print(f'[main] Board.setBuzzer(0)')
     Board.setBuzzer(0) # Turn off the Buzzer
 
-    if DEBUG: print(f'[main] line_count={line_count}')
+    if DEBUG: print(f'[main] line_count,{line_count},distance_list,{len(distance_list)},landmark_list,{len(landmark_list)},')
     if DEBUG: print('[main] Done.')
