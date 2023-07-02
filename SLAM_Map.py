@@ -12,12 +12,14 @@ import Camera
 import threading
 import numpy as np
 import yaml_handle
+import numpy as np
 import pandas as pd
 import HiwonderSDK.Sonar as Sonar
 import HiwonderSDK.Board as Board
 import HiwonderSDK.mecanum as mecanum
 import HiwonderSDK.FourInfrared as FourInfrared
 import imageio.v3 as iio
+import matplotlib.pyplot as plt
 
 ##################################################
 # SLAM Map
@@ -45,10 +47,15 @@ SERVO_DEFAULT_POSITION = 1500 # The default 90-degree position for both camera s
 SERVO_HARD_RIGHT_POSITION = 500 # Pulse Width = Angle-in-degrees * 11.1 + 500 - turn the camera servo hard-right
 SERVO_HARD_LEFT_POSITION = 2500 # Turn the camera servo hard-left = 180 * 11.1 + 500
 MAX_DISTANCE_THRESHOLD = 100.0 # cm - if greater distance_mean away from the wall than this run at full speed
-MAX_SPEED = 50.0 # mm/second - the maximum speed the robot can travel
+MAX_SPEED = 45.0 # mm/second - the maximum speed the robot can travel
 MIN_DISTANCE_THRESHOLD = 5.0 # cm - if distance_mean to the wall is closer than this then stop the robot
-MIN_SPEED = 40.0 # mm/second - the minimum speed the robot can travel if not stopping
-MAX_LINE_COUNT = 7 # stop the robot after detecting this many lines across the track
+MIN_SPEED = 35.0 # mm/second - the minimum speed the robot can travel if not stopping
+MAX_LINE_COUNT = 8 # stop the robot after detecting this many lines across the track
+BELIEVED_STARTING_POINT = -0.10 # The robot believes that it is starting 10 cm back from the first landmark
+BELIEVED_DISTANCE_BETWEEN_WAYPOINTS = 0.02 # The robot will guess each measurement waypoint is x cm from the last
+ACTUAL_DISTANCE_BETWEEN_LANDMARKS = 0.10 # The actual distance (in cm) between landmarks
+LOW_CONFIDENCE_WAYPOINT = 1.0 # The low confidence of the guessed waypoint added to the omega_matrix and xi_vector
+HIGH_CONFIDENCE_LANDMARK = 100.0 # The high confidence of the painted landmarks added to the omega_matrix and xi_vector
 
 servo1_default_position = SERVO_DEFAULT_POSITION # These defaults will be updated by the fine tuning found in the YAML file
 servo2_default_position = SERVO_DEFAULT_POSITION
@@ -178,7 +185,10 @@ def run(camera_image):
     if line_count > 0:
         if line_detected:
             landmark_list.append( len(distance_list) )
-        distance_list.append(distance_sensor)
+        if distance_sensor < MAX_DISTANCE_THRESHOLD:
+            distance_list.append(distance_sensor)
+        else:
+            distance_list.append(np.nan)
 
     return cv2.putText(camera_image, f'Dist:{distance_sensor:.1f}cm Line:{line_count}', (30, 480-30), cv2.FONT_HERSHEY_SIMPLEX, 1.2, IMAGE_TEXT_COLOR, 2)  # Update the camera image
 
@@ -210,6 +220,34 @@ def stop():
     sonar.setPixelColor(0, Board.PixelColor(0, 0, 0))
     if DEBUG: print(f'[stop] sonar.setPixelColor(1, Board.PixelColor(0, 0, 0))')
     sonar.setPixelColor(1, Board.PixelColor(0, 0, 0))
+
+def generate_omega_xi():
+    """
+    This routine converts the sample distance x-locations into the
+    omega_matrix and xi_vector used by the Graph SLAM algorithm, as
+    well as the y-distance measurements to the feature wall.
+    """
+    global distance_list
+    global landmark_list
+
+    omega_matrix = np.zeros([len(distance_list), len(distance_list)], dtype=float) # Initialize the datasets based upon the size of the actual measurements
+    xi_vector = np.zeros(len(distance_list), dtype=float)
+    for i in range(len(distance_list) - 1):
+        # Add the naive distances between the waypoints to the omega_matrix and xi_vector
+        omega_matrix[i, i] += 1 * LOW_CONFIDENCE_WAYPOINT # distance between waypoint i and waypoint i+1
+        omega_matrix[i, i+1] += -1 * LOW_CONFIDENCE_WAYPOINT
+        omega_matrix[i+1, i] += -1 * LOW_CONFIDENCE_WAYPOINT
+        omega_matrix[i+1, i+1] += 1 * LOW_CONFIDENCE_WAYPOINT
+        xi_vector[i] += -BELIEVED_DISTANCE_BETWEEN_WAYPOINTS * LOW_CONFIDENCE_WAYPOINT # location difference between waypoints
+        xi_vector[i+1] += BELIEVED_DISTANCE_BETWEEN_WAYPOINTS * LOW_CONFIDENCE_WAYPOINT
+
+        # Add the precise landmarks to the omega_matrix and xi_vector
+        if i in landmark_list:
+            landmark_location = landmark_list.index(i) * ACTUAL_DISTANCE_BETWEEN_LANDMARKS
+            omega_matrix[i, i] += 1 * HIGH_CONFIDENCE_LANDMARK
+            xi_vector[i] += landmark_location * HIGH_CONFIDENCE_LANDMARK
+
+    return omega_matrix, xi_vector
 
 # Main routine
 if __name__ == '__main__':
@@ -251,9 +289,10 @@ if __name__ == '__main__':
             Frame = run(frame)  
             frame_resize = cv2.resize(Frame, (320, 240)) # Resize the image down to 320*240
             cv2.imshow('frame', frame_resize)
-            image_filename = os.path.join(IMAGES_DIRECTORY, f'{image_id:03d}.jpg')
-            cv2.imwrite(image_filename, frame) # Save the image
-            image_filenames.append(image_filename)
+            if GENERATE_MOVIE:
+                image_filename = os.path.join(IMAGES_DIRECTORY, f'{image_id:03d}.jpg')
+                cv2.imwrite(image_filename, frame) # Save the image
+                image_filenames.append(image_filename)
             image_id += 1
             key = cv2.waitKey(1)
             if key == 27:
@@ -287,5 +326,19 @@ if __name__ == '__main__':
     if DEBUG: print(f'[main] Board.setBuzzer(0)')
     Board.setBuzzer(0) # Turn off the Buzzer
 
-    if DEBUG: print(f'[main] line_count,{line_count},distance_list,{len(distance_list)},landmark_list,{len(landmark_list)},')
+    # Run the SLAM algorithm to calculate the more accurate x_locations using the Graph SLAM algorithm to calculate mu
+    omega_matrix, xi_vector = generate_omega_xi()
+    calculated_mu_x = np.linalg.inv(np.matrix(omega_matrix)) * np.expand_dims(xi_vector, 0).transpose()
+    if DEBUG: print(f'[main] line_count,{line_count},distance_list,{len(distance_list)},landmark_list,{len(landmark_list)},calculated_mu_x,{len(calculated_mu_x)},')
+
+    # Plot the shape of the feature wall based upon the Graph SLAM calculations
+    output_figure_filename = 'feature_wall.png'
+    output_figure_filepath = IMAGES_DIRECTORY + '/' + output_figure_filename
+    plt.title("Shape of the Feature Wall")
+    plt.scatter(list(calculated_mu_x), list(distance_list), label='Feature Wall', s=5)
+    plt.xlabel('x-location along 1-dimensional track')
+    plt.ylabel('y-measurement to feature wall') 
+    plt.savefig(output_figure_filepath)
+
+    # Finish up and exit
     if DEBUG: print('[main] Done.')
