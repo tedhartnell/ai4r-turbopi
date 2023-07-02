@@ -16,6 +16,7 @@ import pandas as pd
 import HiwonderSDK.Sonar as Sonar
 import HiwonderSDK.Board as Board
 import HiwonderSDK.mecanum as mecanum
+import HiwonderSDK.FourInfrared as FourInfrared
 import imageio.v3 as iio
 
 ##################################################
@@ -29,6 +30,9 @@ import imageio.v3 as iio
 # a sequence of photos as it moves. When it stops the
 # robot will stitch the photos together into a gif movie.
 #
+# Along the way the robot will count the number of
+# black lines it crosses over.
+#
 ##################################################
 
 # Check the version of Python running this code
@@ -37,6 +41,7 @@ if sys.version_info.major <= 2:
     sys.exit(0)
 
 DEBUG = True
+GENERATE_MOVIE = False
 IMAGES_DIRECTORY = './images'
 MOVIES_DIRECTORY = './movies'
 IMAGE_TEXT_SIZE = 12
@@ -56,11 +61,16 @@ servo2_default_position = SERVO_DEFAULT_POSITION
 distance_mean = MAX_DISTANCE_THRESHOLD # cm - the mean distance to the wall
 distance_last = MAX_DISTANCE_THRESHOLD # cm - distances can only decrease as the wall approaches
 distance_list = []
+line_latched = False # Latched True if any of the infrared sensors detect a line
+line_detected = False # True for a single scan when a line is detected
+line_count = 0 # Count the number of lines detected by the robot as it runs
 speed = MAX_SPEED
+
 
 robot = mecanum.MecanumChassis()
 sonar = Sonar.Sonar()
 camera = Camera.Camera()
+infrared = FourInfrared.FourInfrared()
 
 stop_motor = True
 is_running = False
@@ -155,13 +165,34 @@ def run(camera_image):
     global distance_mean
     global distance_last
     global distance_list
+    global line_latched
+    global line_detected
+    global line_count
 
     # Get the raw distance measurement from the sensor
     distance_sensor = sonar.getDistance() / 10.0 # Maximum sensor accuracy = 40 cm
     if False and DEBUG: print(f'[run] distance_sensor={distance_sensor}')
 
+    # Get the four infrared line detector sensors (each is True or False)
+    # line_detected is set True for just a single scan
+    line_list = infrared.readData()
+    count_detected = 0
+    for line in line_list:
+        if line: count_detected += 1
+    if not line_latched and count_detected > 0:
+        line_detected = True
+        line_latched = True
+    elif count_detected == 0:
+        line_detected = False
+        line_latched = False
+    else:
+        line_detected = False
+    if line_detected:
+        line_count += 1
+        if DEBUG: print(f'[run] line_count={line_count}')
+
     # Ignore bad sensor measurements if the wall is getting further away 
-    if distance_sensor <= distance_last:
+    if distance_sensor <= MAX_DISTANCE_THRESHOLD: # distance_last
         distance_last = distance_sensor
         distance_list.append(distance_sensor)
         dataframe = pd.DataFrame(distance_list)
@@ -175,7 +206,7 @@ def run(camera_image):
         if len(distance_list) >= 5:
             distance_list.remove(distance_list[0])
 
-    return cv2.putText(camera_image, "Dist:%.1fcm"%distance_mean, (30, 480-30), cv2.FONT_HERSHEY_SIMPLEX, 1.2, IMAGE_TEXT_COLOR, 2)  # Update the camera image
+    return cv2.putText(camera_image, f'Dist:{distance_mean:.1f}cm Line:{line_count}', (30, 480-30), cv2.FONT_HERSHEY_SIMPLEX, 1.2, IMAGE_TEXT_COLOR, 2)  # Update the camera image
 
 # Stop the robot and restore defaults
 def stop():
@@ -269,11 +300,12 @@ if __name__ == '__main__':
     cv2.destroyAllWindows()
 
     # Create Gif Animation - Heatmap Actions
-    if DEBUG: print(f'[main] Writing: {MOVIES_DIRECTORY}/camera_movie.gif') 
-    camera_images = []
-    for filename in image_filenames:
-        camera_images.append(iio.imread(filename))
-    iio.imwrite(f'{MOVIES_DIRECTORY}/camera_movie.gif', camera_images, loop=0, duration=100) # duration(in ms): `fps=50` == `duration=20` (1000 * 1/50)
+    if DEBUG: print(f'[main] Writing: {MOVIES_DIRECTORY}/camera_movie.gif')
+    if GENERATE_MOVIE:
+        camera_images = []
+        for filename in image_filenames:
+            camera_images.append(iio.imread(filename))
+        iio.imwrite(f'{MOVIES_DIRECTORY}/camera_movie.gif', camera_images, loop=0, duration=100) # duration(in ms): `fps=50` == `duration=20` (1000 * 1/50)
 
     # Announce the exit of main
     if DEBUG: print(f'[main] Board.setBuzzer(1)')
@@ -282,4 +314,5 @@ if __name__ == '__main__':
     if DEBUG: print(f'[main] Board.setBuzzer(0)')
     Board.setBuzzer(0) # Turn off the Buzzer
 
+    if DEBUG: print(f'[main] line_count={line_count}')
     if DEBUG: print('[main] Done.')
