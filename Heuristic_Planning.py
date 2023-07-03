@@ -53,10 +53,12 @@ MAX_SPEED = 100.0 # mm/second - the maximum speed the robot can travel
 MIN_DISTANCE_THRESHOLD = 5.0 # cm - if distance_mean to the wall is closer than this then stop the robot
 MIN_SPEED = 50.0 # mm/second - the minimum speed the robot can travel if not stopping
 MAX_LINE_COUNT = 8 # stop the robot after detecting this many lines across the track
-FORWARD_DISTANCE_PER_ITERATION = 54.0 / 180 # cm (measured at speed = 50) - the distance traveled by the robot per iteration when traveling forward
-RIGHT_DISTANCE_PER_ITERATION = 54.0 / 800 # cm - the distance traveled by the robot per iteration when traveling right
-FORWARD_DISTANCE_PER_STATE = 27.0 # cm - the distance traveled forward between states
-RIGHT_DISTANCE_PER_STATE = 27.0 # cm - the distance traveled right between states
+LENGTH_OF_ROBOT = 20.0 # cm - the length of the robot
+WIDTH_OF_ROBOT = 16.0 # cm - the width of the robot
+NORTH_SOUTH_DISTANCE_PER_ITERATION = 54.0 / 500 # cm (measured at speed = 50) - the distance traveled by the robot per iteration when traveling forward
+EAST_WEST_DISTANCE_PER_ITERATION = 54.0 / 600 # cm - the distance traveled by the robot per iteration when traveling right
+NORTH_SOUTH_DISTANCE_PER_STATE = 27.0 # cm - the distance traveled forward between states
+EAST_WEST_DISTANCE_PER_STATE = 27.0 # cm - the distance traveled right between states
 
 # Robot Hardware
 robot = mecanum.MecanumChassis()
@@ -74,8 +76,6 @@ speed = MIN_SPEED # The robot runs at a constant minimim speed
 
 # Robot Runtime Variables
 is_running = False
-forward_distance = 0.0 # The cumulative distance traveled in the forward-direction 
-right_distance = 0.0 # The cumulative distance traveled in the right-direction
 
 # Compass and Navigation
 compass_not_applicable = -1
@@ -87,15 +87,17 @@ compass_east = 3
 # Grid World Format:
 #   0 = Navigable State
 #   1 = Occupied State
-grid_world   = [[0, 0, 0], # row x column
+grid_world   = [[1, 0, 0], # row x column
                 [0, 1, 0],
                 [0, 0, 0]]
 state_grid   = [[]] # The policy grid filled in by the routine generate_comprehensive_policy_grid()
 
 # Key grid locations
-start_location = [2, 0, compass_east] # [row, column, direction] # Direction = N,W,S,E
+start_location = [2, 0, compass_north] # [row, column, direction] # Direction = N,W,S,E
 goal_location = [0, 2, compass_west] # [row, column, direction]
 current_location = start_location
+south_distance = start_location[0] * NORTH_SOUTH_DISTANCE_PER_STATE # The cumulative distance traveled in the south-direction (increasing rows) 
+east_distance = start_location[1] * EAST_WEST_DISTANCE_PER_STATE # The cumulative distance traveled in the right-direction (increasing columns)
 
 # Compass Actions
 compass_actions =  [[-1,  0], # Go North
@@ -287,14 +289,16 @@ def move():
     global state_grid
     global goal_location
     global current_location
+    global compass_names
     global compass_angles
-    global forward_distance
-    global right_distance
+    global south_distance
+    global east_distance
     if DEBUG: print("[move]")
 
     # Move the robot according to the plan
     iteration = 0
     previous_location = None
+    direction_name = compass_names[ current_location[2] ]
     while True:
         if is_running and line_count == 0:
             
@@ -302,12 +306,14 @@ def move():
             if current_location[0] == goal_location[0] and current_location[1] == goal_location[1]:
                 is_running = False
                 speed = 0.0
+                if DEBUG: print(f'[move] REACHED GOAL: iteration,{iteration},south_distance,{south_distance:.1f},east_distance,{east_distance:.1f},current_location,{current_location}: {direction_name} robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
                 continue
 
             # Check if the robot has hit a barrier
             if state_grid[current_location[0]][current_location[1]] < 0:
                 is_running = False
                 speed = 0.0
+                if DEBUG: print(f'[move] HIT INNER-BLOCK: iteration,{iteration},south_distance,{south_distance:.1f},east_distance,{east_distance:.1f},current_location,{current_location}: {direction_name} robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
                 continue
 
             # Set the robot speed and direction using the policy
@@ -318,30 +324,35 @@ def move():
             if previous_location != None:
                 # Aggregate the direction traveled
                 if previous_location[2] == compass_north:
-                    forward_distance += FORWARD_DISTANCE_PER_ITERATION
+                    south_distance -= NORTH_SOUTH_DISTANCE_PER_ITERATION
+                    current_location[0] = int(south_distance // NORTH_SOUTH_DISTANCE_PER_STATE) + 1
                 if previous_location[2] == compass_west:
-                    right_distance -= RIGHT_DISTANCE_PER_ITERATION
+                    east_distance -= EAST_WEST_DISTANCE_PER_ITERATION
+                    current_location[1] = int(east_distance // EAST_WEST_DISTANCE_PER_STATE) + 1
                 if previous_location[2] == compass_south:
-                    forward_distance -= FORWARD_DISTANCE_PER_ITERATION
+                    current_location[0] = int(south_distance // NORTH_SOUTH_DISTANCE_PER_STATE)
+                    south_distance += NORTH_SOUTH_DISTANCE_PER_ITERATION
                 if previous_location[2] == compass_east:
-                    right_distance += RIGHT_DISTANCE_PER_ITERATION
+                    east_distance += EAST_WEST_DISTANCE_PER_ITERATION
+                    current_location[1] = int(east_distance // EAST_WEST_DISTANCE_PER_STATE)
             previous_location = current_location
 
             # Estimate the state location in the grid_world of the robot
-            current_location[0] = forward_distance // FORWARD_DISTANCE_PER_STATE
             if current_location[0] < 0: current_location[0] = 0
             if current_location[0] > len(grid_world) - 1: current_location[0] = len(grid_world) - 1
-            current_location[1] = right_distance // RIGHT_DISTANCE_PER_STATE
             if current_location[1] < 0: current_location[1] = 0
             if current_location[1] > len(grid_world[0]) - 1: current_location[1] = len(grid_world[0]) - 1
             iteration += 1
         else:
+            if DEBUG and line_count > 0: print(f'[move] HIT OUTER-BOUNDARY: iteration,{iteration},south_distance,{south_distance:.1f},east_distance,{east_distance:.1f},current_location,{current_location}: {direction_name} robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
             is_running = False # The robot should stop immediately if it hits a out-of-bounds black line
             speed = 0.0
         
         # Set the robot's speed and direction
         direction_angle = compass_angles[ current_location[2] ]
-        if DEBUG and is_running: print(f'[move] iteration,{iteration},forward_distance,{forward_distance},right_distance,{right_distance},current_location,{current_location}: robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
+        direction_name = compass_names[ current_location[2] ]
+
+        if False and DEBUG and is_running: print(f'[move] iteration,{iteration},south_distance,{south_distance:.1f},east_distance,{east_distance:.1f},current_location,{current_location}: {direction_name} robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
         robot.set_velocity(speed, direction_angle, 0)
 
 # Collect the runtime sensor data from the robot hardware
@@ -503,8 +514,8 @@ def main():
     cv2.destroyAllWindows()
 
     # Create Gif Animation - Heatmap Actions
-    if DEBUG: print(f'[main] Writing: {MOVIES_DIRECTORY}/camera_movie.gif')
     if GENERATE_MOVIE:
+        if DEBUG: print(f'[main] Writing: {MOVIES_DIRECTORY}/camera_movie.gif')
         camera_images = []
         for filename in image_filenames:
             camera_images.append(iio.imread(filename))
