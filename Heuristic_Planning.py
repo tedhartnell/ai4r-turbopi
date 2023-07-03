@@ -46,15 +46,15 @@ IMAGE_TEXT_COLOR = (0, 255, 255)
 SERVO_DEFAULT_POSITION = 1500 # The default 90-degree position for both camera servos - may have been adjusted
 SERVO_HARD_RIGHT_POSITION = 500 # Pulse Width = Angle-in-degrees * 11.1 + 500 - turn the camera servo hard-right
 SERVO_HARD_LEFT_POSITION = 2500 # Turn the camera servo hard-left = 180 * 11.1 + 500
-SERVO_HARD_DOWN_POSITION = 500 # Pulse Width = Angle-in-degrees * 11.1 + 500 - turn the camera servo hard-down
-SERVO_HARD_UP_POSITION = 2500 # Turn the camera servo hard-up = 180 * 11.1 + 500
+SERVO_HARD_UP_POSITION = 500 # Turn the camera servo hard-up = 180 * 11.1 + 500
+SERVO_HARD_DOWN_POSITION = 2500 # Pulse Width = Angle-in-degrees * 11.1 + 500 - turn the camera servo hard-down
 MAX_DISTANCE_THRESHOLD = 100.0 # cm - if greater distance_mean away from the wall than this run at full speed
 MAX_SPEED = 100.0 # mm/second - the maximum speed the robot can travel
 MIN_DISTANCE_THRESHOLD = 5.0 # cm - if distance_mean to the wall is closer than this then stop the robot
-MIN_SPEED = 35.0 # mm/second - the minimum speed the robot can travel if not stopping
+MIN_SPEED = 50.0 # mm/second - the minimum speed the robot can travel if not stopping
 MAX_LINE_COUNT = 8 # stop the robot after detecting this many lines across the track
-FORWARD_DISTANCE_PER_ITERATION = 1.0 # cm - the distance traveled by the robot per iteration when traveling forward
-RIGHT_DISTANCE_PER_ITERATION = 1.0 # cm - the distance traveled by the robot per iteration when traveling right
+FORWARD_DISTANCE_PER_ITERATION = 54.0 / 180 # cm (measured at speed = 50) - the distance traveled by the robot per iteration when traveling forward
+RIGHT_DISTANCE_PER_ITERATION = 54.0 / 800 # cm - the distance traveled by the robot per iteration when traveling right
 FORWARD_DISTANCE_PER_STATE = 27.0 # cm - the distance traveled forward between states
 RIGHT_DISTANCE_PER_STATE = 27.0 # cm - the distance traveled right between states
 
@@ -67,8 +67,6 @@ infrared = FourInfrared.FourInfrared()
 # Robot State Variables
 servo1_default_position = SERVO_DEFAULT_POSITION # These defaults will be updated by the fine tuning found in the YAML file
 servo2_default_position = SERVO_DEFAULT_POSITION
-distance_list = [] # List of distance measurements to the feature wall
-landmark_list = [] # List of distance offsets when a landmark line is detected
 line_latched = False # Latched True if any of the infrared sensors detect a line
 line_detected = False # True for a single scan when a line is detected
 line_count = 0 # Count the number of lines detected by the robot as it runs
@@ -92,9 +90,10 @@ compass_east = 3
 grid_world   = [[0, 0, 0], # row x column
                 [0, 1, 0],
                 [0, 0, 0]]
+state_grid   = [[]] # The policy grid filled in by the routine generate_comprehensive_policy_grid()
 
 # Key grid locations
-start_location = [2, 0, compass_north] # [row, column, direction] # Direction = N,W,S,E
+start_location = [2, 0, compass_east] # [row, column, direction] # Direction = N,W,S,E
 goal_location = [0, 2, compass_west] # [row, column, direction]
 current_location = start_location
 
@@ -276,25 +275,44 @@ def initialize():
     time.sleep(1.0) # Allow time for the camera to turn on
 
     # Turn the sonar colors on - Green
-    if DEBUG: print(f'[initialize] sonar.setPixelColor(0, Board.PixelColor(0, 0, 255))')
-    sonar.setPixelColor(0, Board.PixelColor(0, 0, 255))
-    if DEBUG: print(f'[initialize] sonar.setPixelColor(1, Board.PixelColor(0, 0, 255))')
-    sonar.setPixelColor(1, Board.PixelColor(0, 0, 255))
+    if DEBUG: print(f'[initialize] sonar.setPixelColor(0, Board.PixelColor(0, 255, 0))')
+    sonar.setPixelColor(0, Board.PixelColor(0, 255, 0))
+    if DEBUG: print(f'[initialize] sonar.setPixelColor(1, Board.PixelColor(0, 255, 0))')
+    sonar.setPixelColor(1, Board.PixelColor(0, 255, 0))
 
 # Move the robot each iteration - this routine runs independently in a thread
 def move():
     global is_running
     global line_count
+    global state_grid
+    global goal_location
     global current_location
     global compass_angles
     global forward_distance
     global right_distance
-
     if DEBUG: print("[move]")
+
+    # Move the robot according to the plan
+    iteration = 0
     previous_location = None
     while True:
         if is_running and line_count == 0:
+            
+            # Check if the robot has reached the goal
+            if current_location[0] == goal_location[0] and current_location[1] == goal_location[1]:
+                is_running = False
+                speed = 0.0
+                continue
+
+            # Check if the robot has hit a barrier
+            if state_grid[current_location[0]][current_location[1]] < 0:
+                is_running = False
+                speed = 0.0
+                continue
+
+            # Set the robot speed and direction using the policy
             speed = MIN_SPEED
+            current_location[2] = state_grid[current_location[0]][current_location[1]]
 
             # Estimate the absolute location (in cm) of the robot
             if previous_location != None:
@@ -316,29 +334,26 @@ def move():
             current_location[1] = right_distance // RIGHT_DISTANCE_PER_STATE
             if current_location[1] < 0: current_location[1] = 0
             if current_location[1] > len(grid_world[0]) - 1: current_location[1] = len(grid_world[0]) - 1
+            iteration += 1
         else:
             is_running = False # The robot should stop immediately if it hits a out-of-bounds black line
             speed = 0.0
         
         # Set the robot's speed and direction
         direction_angle = compass_angles[ current_location[2] ]
-        if DEBUG: print(f'[move] robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
+        if DEBUG and is_running: print(f'[move] iteration,{iteration},forward_distance,{forward_distance},right_distance,{right_distance},current_location,{current_location}: robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
         robot.set_velocity(speed, direction_angle, 0)
-
-FORWARD_DISTANCE_PER_ITERATION = 1.0 # cm - the distance traveled by the robot per iteration when traveling forward
-RIGHT_DISTANCE_PER_ITERATION = 1.0 # cm - the distance traveled by the robot per iteration when traveling right
-FORWARD_DISTANCE_PER_STATE = 27.0 # cm - the distance traveled forward between states
-RIGHT_DISTANCE_PER_STATE = 27.0 # cm - the distance traveled right between states
-
 
 # Collect the runtime sensor data from the robot hardware
 def run(camera_image):
+    global is_running
     global distance_list
     global landmark_list
     global line_latched
     global line_detected
     global line_count
     global current_location
+    if False and DEBUG: print(f'[run]')
 
     # Get the raw distance measurement from the sensor
     distance_sensor = sonar.getDistance() / 10.0 # Maximum sensor accuracy = 40 cm
@@ -347,13 +362,13 @@ def run(camera_image):
     # Get the four infrared line detector sensors (each is True or False)
     # line_detected is set True for just a single scan
     line_list = infrared.readData()
-    count_detected = 0
+    infrared_sensors_detected = 0
     for line in line_list:
-        if line: count_detected += 1
-    if not line_latched and count_detected > 0:
+        if line: infrared_sensors_detected += 1
+    if not line_latched and infrared_sensors_detected > 0:
         line_detected = True
         line_latched = True
-    elif count_detected == 0:
+    elif infrared_sensors_detected == 0:
         line_detected = False
         line_latched = False
     else:
@@ -366,10 +381,13 @@ def run(camera_image):
 
 # Stop the robot and restore defaults
 def stop():
+    global is_running
+    global servo1_default_position
+    global servo2_default_position
     if DEBUG: print("[stop]")
-    is_running = False
 
     # Stop the robot from moving - stopping twice was part of the original code - also added motor hard-stops
+    is_running = False
     if DEBUG: print(f'[stop] robot.set_velocity(0, 90, 0)')
     robot.set_velocity(0, 90, 0)
     time.sleep(0.3)
@@ -412,7 +430,19 @@ def stop():
 
 # Main routine
 def main():
+    global is_running
+    global state_grid
     if DEBUG: print('[main]')
+
+    # Calculate an heuristic that will quickly move the robot towards the goal
+    print('Heuristic World:')
+    heuristic_world = generate_heuristic_world(check_grid_world=True)
+    pretty_print_2d(heuristic_world, True)
+
+    # Generate the motion policy
+    print('Comprehensive Policy Action Grid:')
+    state_grid = generate_comprehensive_policy_grid(heuristic_world)
+    pretty_print_2d_characters(state_grid, compass_names)
 
     # Announce the initialization of the robot
     if DEBUG: print(f'[main] Board.setBuzzer(1)')
@@ -486,20 +516,6 @@ def main():
     time.sleep(1.0) # Leave the Buzzer on for a long blip
     if DEBUG: print(f'[main] Board.setBuzzer(0)')
     Board.setBuzzer(0) # Turn off the Buzzer
-
-    # Run the SLAM algorithm to calculate the more accurate x_locations using the Graph SLAM algorithm to calculate mu
-    omega_matrix, xi_vector = generate_omega_xi()
-    calculated_mu_x = np.linalg.inv(np.matrix(omega_matrix)) * np.expand_dims(xi_vector, 0).transpose()
-    if DEBUG: print(f'[main] line_count,{line_count},distance_list,{len(distance_list)},landmark_list,{len(landmark_list)},calculated_mu_x,{len(calculated_mu_x)},')
-
-    # Plot the shape of the feature wall based upon the Graph SLAM calculations
-    output_figure_filename = 'feature_wall.png'
-    output_figure_filepath = IMAGES_DIRECTORY + '/' + output_figure_filename
-    plt.title("Shape of the Feature Wall")
-    plt.scatter(list(calculated_mu_x), list(distance_list), label='Feature Wall', s=5)
-    plt.xlabel('x-location along 1-dimensional track')
-    plt.ylabel('y-measurement to feature wall') 
-    plt.savefig(output_figure_filepath)
 
     # Finish up and exit
     if DEBUG: print('[main] Done.')
