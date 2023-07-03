@@ -31,6 +31,9 @@ import matplotlib.pyplot as plt
 #
 ##################################################
 
+#TODO Improve distance traveled calculation
+#TODO Meet unexpected holes
+
 # Check the version of Python running this code
 if sys.version_info.major <= 2:
     print('Please run this program with python3!')
