@@ -37,7 +37,7 @@ if sys.version_info.major <= 2:
     sys.exit(0)
 
 DEBUG = True
-GENERATE_MOVIE = False
+GENERATE_MOVIE = True
 IMAGES_DIRECTORY = './images'
 MOVIES_DIRECTORY = './movies'
 IMAGE_TEXT_SIZE = 12
@@ -182,7 +182,7 @@ def run(camera_image):
         if DEBUG: print(f'[run] line_count={line_count}')
 
     # Collect measurements to the feature wall and offsets to landmarks
-    if line_count > 0:
+    if line_count > 0 and line_count < MAX_LINE_COUNT:
         if line_detected:
             landmark_list.append( len(distance_list) )
         if distance_sensor < MAX_DISTANCE_THRESHOLD:
@@ -190,19 +190,28 @@ def run(camera_image):
         else:
             distance_list.append(np.nan)
 
-    return cv2.putText(camera_image, f'Dist:{distance_sensor:.1f}cm Line:{line_count}', (30, 480-30), cv2.FONT_HERSHEY_SIMPLEX, 1.2, IMAGE_TEXT_COLOR, 2)  # Update the camera image
+    return cv2.putText(camera_image, f'Line:{line_count} Distance:{distance_sensor:.1f}cm', (30, 480-30), cv2.FONT_HERSHEY_SIMPLEX, 1.2, IMAGE_TEXT_COLOR, 2)  # Update the camera image
 
 # Stop the robot and restore defaults
 def stop():
     if DEBUG: print("[stop]")
     is_running = False
 
-    # Stop the robot from moving - stopping twice was part of the original code
+    # Stop the robot from moving - stopping twice was part of the original code - also added motor hard-stops
     if DEBUG: print(f'[stop] robot.set_velocity(0, 90, 0)')
     robot.set_velocity(0, 90, 0)
     time.sleep(0.3)
     if DEBUG: print(f'[stop] robot.set_velocity(0, 90, 0)')
     robot.set_velocity(0, 90, 0)
+    time.sleep(0.3)
+    if DEBUG: print(f'[stop] Board.setMotor(1, 0)')
+    Board.setMotor(1, 0)
+    if DEBUG: print(f'[stop] Board.setMotor(2, 0)')
+    Board.setMotor(2, 0)
+    if DEBUG: print(f'[stop] Board.setMotor(3, 0)')
+    Board.setMotor(3, 0)
+    if DEBUG: print(f'[stop] Board.setMotor(4, 0)')
+    Board.setMotor(4, 0)
 
     # Restore the camera to the default position
     if DEBUG: print(f'[stop] Board.setPWMServoPulse(2, {servo2_default_position}, 1000)')
