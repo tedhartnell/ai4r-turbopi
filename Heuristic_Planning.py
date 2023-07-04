@@ -292,6 +292,7 @@ def move():
     global state_grid
     global goal_location
     global current_location
+    global compass_actions
     global compass_names
     global compass_angles
     global south_distance
@@ -352,19 +353,26 @@ def move():
             if current_location[0] > len(grid_world) - 1: current_location[0] = len(grid_world) - 1
             if current_location[1] < 0: current_location[1] = 0
             if current_location[1] > len(grid_world[0]) - 1: current_location[1] = len(grid_world[0]) - 1
+
+            # Determine the next expected state the robot will enter in the grid_world
+            next_location = current_location.copy()
+            if current_location[2] >= 0:
+                next_location[0] += compass_actions[current_location[2]][0]
+                next_location[1] += compass_actions[current_location[2]][1]
+                if next_location[0] < 0: next_location[0] = 0
+                if next_location[0] > len(grid_world) - 1: next_location[0] = len(grid_world) - 1
+                if next_location[1] < 0: next_location[1] = 0
+                if next_location[1] > len(grid_world[0]) - 1: next_location[1] = len(grid_world[0]) - 1
+
             iteration += 1
         elif not single_stop_iteration:
             is_running = False # The robot should stop immediately if it hits a out-of-bounds black line
             speed = 0.0
             robot.set_velocity(speed, direction_angle, 0)
 
-            # May have stopped before the next state is reached so re-calculate current location
-            current_location[0] = int(south_distance // NORTH_SOUTH_DISTANCE_PER_STATE)
-            current_location[1] = int(east_distance // EAST_WEST_DISTANCE_PER_STATE)
-            if current_location[0] < 0: current_location[0] = 0
-            if current_location[0] > len(grid_world) - 1: current_location[0] = len(grid_world) - 1
-            if current_location[1] < 0: current_location[1] = 0
-            if current_location[1] > len(grid_world[0]) - 1: current_location[1] = len(grid_world[0]) - 1
+            # Set the location to the 'next location' where the barrier is located
+            current_location[0] = next_location[0]
+            current_location[1] = next_location[1]
 
             # Update the user
             if DEBUG and line_count > 0: print(f'[move] HIT UNKNOWN BARRIER: iteration,{iteration},south_distance,{south_distance:.1f},east_distance,{east_distance:.1f},current_location,{current_location}: {direction_name} robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
