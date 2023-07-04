@@ -32,9 +32,6 @@ import matplotlib.pyplot as plt
 #
 ##################################################
 
-#TODO Improve distance traveled calculation
-#TODO Meet unexpected holes
-
 # Check the version of Python running this code
 if sys.version_info.major <= 2:
     print('Please run this program with python3!')
@@ -101,7 +98,7 @@ state_grid   = [[]] # The policy grid filled in by the routine generate_comprehe
 # Key grid locations
 start_location = [2, 0, compass_north] # [row, column, direction] # Direction = N,W,S,E
 goal_location = [0, 2, compass_west] # [row, column, direction]
-current_location = start_location
+current_location = start_location.copy()
 south_distance = start_location[0] * NORTH_SOUTH_DISTANCE_PER_STATE # The cumulative distance traveled in the south-direction (increasing rows) 
 east_distance = start_location[1] * EAST_WEST_DISTANCE_PER_STATE # The cumulative distance traveled in the right-direction (increasing columns)
 
@@ -282,11 +279,11 @@ def initialize():
     camera.camera_open(correction=True) # Take an image from the camera
     time.sleep(1.0) # Allow time for the camera to turn on
 
-    # Turn the sonar colors on - Green
-    if DEBUG: print(f'[initialize] sonar.setPixelColor(0, Board.PixelColor(0, 255, 0))')
-    sonar.setPixelColor(0, Board.PixelColor(0, 255, 0))
-    if DEBUG: print(f'[initialize] sonar.setPixelColor(1, Board.PixelColor(0, 255, 0))')
-    sonar.setPixelColor(1, Board.PixelColor(0, 255, 0))
+    # Turn the sonar colors off
+    if DEBUG: print(f'[initialize] sonar.setPixelColor(0, Board.PixelColor(0, 0, 0))')
+    sonar.setPixelColor(0, Board.PixelColor(0, 0, 0))
+    if DEBUG: print(f'[initialize] sonar.setPixelColor(1, Board.PixelColor(0, 0, 0))')
+    sonar.setPixelColor(1, Board.PixelColor(0, 0, 0))
 
 # Move the robot each iteration - this routine runs independently in a thread
 def move():
@@ -310,7 +307,8 @@ def move():
     previous_time = current_time
     while True:
         if is_running and line_count == 0:
-            
+            single_stop_iteration = False
+
             # Check if the robot has reached the goal
             if current_location[0] == goal_location[0] and current_location[1] == goal_location[1]:
                 is_running = False
@@ -322,7 +320,7 @@ def move():
             if state_grid[current_location[0]][current_location[1]] < 0:
                 is_running = False
                 speed = 0.0
-                if DEBUG: print(f'[move] HIT INNER-BLOCK: iteration,{iteration},south_distance,{south_distance:.1f},east_distance,{east_distance:.1f},current_location,{current_location}: {direction_name} robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
+                if DEBUG: print(f'[move] HIT KNOWN BARRIER: iteration,{iteration},south_distance,{south_distance:.1f},east_distance,{east_distance:.1f},current_location,{current_location}: {direction_name} robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
                 continue
 
             # Set the robot speed and direction using the policy
@@ -356,13 +354,31 @@ def move():
             if current_location[1] > len(grid_world[0]) - 1: current_location[1] = len(grid_world[0]) - 1
             iteration += 1
         elif not single_stop_iteration:
-            if DEBUG and line_count > 0: print(f'[move] HIT OUTER-BOUNDARY: iteration,{iteration},south_distance,{south_distance:.1f},east_distance,{east_distance:.1f},current_location,{current_location}: {direction_name} robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
             is_running = False # The robot should stop immediately if it hits a out-of-bounds black line
             speed = 0.0
+            robot.set_velocity(speed, direction_angle, 0)
+
+            # May have stopped before the next state is reached so re-calculate current location
+            current_location[0] = int(south_distance // NORTH_SOUTH_DISTANCE_PER_STATE)
+            current_location[1] = int(east_distance // EAST_WEST_DISTANCE_PER_STATE)
+            if current_location[0] < 0: current_location[0] = 0
+            if current_location[0] > len(grid_world) - 1: current_location[0] = len(grid_world) - 1
+            if current_location[1] < 0: current_location[1] = 0
+            if current_location[1] > len(grid_world[0]) - 1: current_location[1] = len(grid_world[0]) - 1
+
+            # Update the user
+            if DEBUG and line_count > 0: print(f'[move] HIT UNKNOWN BARRIER: iteration,{iteration},south_distance,{south_distance:.1f},east_distance,{east_distance:.1f},current_location,{current_location}: {direction_name} robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
+
+            # Show the user what is happening to the robot
+            if found_goal():
+                flash(0, 0, 255) # Flash the robot's sonar lights - blue
+            else:
+                flash(255, 0, 0) # Flash the robot's sonar lights - red
+
             single_stop_iteration = True # Only do these things once
         else:
-            is_running = False # The robot should stop immediately if it hits a out-of-bounds black line
-            speed = 0.0
+            current_time = timer()
+            previous_time = current_time
         
         # Set the robot's speed and direction
         direction_angle = compass_angles[ current_location[2] ]
@@ -374,8 +390,6 @@ def move():
 # Collect the runtime sensor data from the robot hardware
 def run(camera_image):
     global is_running
-    global distance_list
-    global landmark_list
     global line_latched
     global line_detected
     global line_count
@@ -414,7 +428,6 @@ def stop():
     if DEBUG: print("[stop]")
 
     # Stop the robot from moving - stopping twice was part of the original code - also added motor hard-stops
-    is_running = False
     if DEBUG: print(f'[stop] robot.set_velocity(0, 90, 0)')
     robot.set_velocity(0, 90, 0)
     time.sleep(0.3)
@@ -455,10 +468,51 @@ def stop():
     if DEBUG: print(f'[stop] sonar.setPixelColor(1, Board.PixelColor(0, 0, 0))')
     sonar.setPixelColor(1, Board.PixelColor(0, 0, 0))
 
+# Sound robot buzzer
+def buzz(duration=1.0):
+    if DEBUG: print(f'[buzz] Board.setBuzzer(1)')
+    Board.setBuzzer(1) # Turn on the Buzzer
+    time.sleep(duration) # Leave the Buzzer on for the duration
+    if DEBUG: print(f'[buzz] Board.setBuzzer(0)')
+    Board.setBuzzer(0) # Turn off the Buzzer
+
+# Flash the robot sonar lights
+def flash(red=0, green=0, blue=0, count=5, duration=0.5):
+    for i in range(count):
+        # Turn the sonar colors on
+        if False and DEBUG: print(f'[flash] sonar.setPixelColor(0, Board.PixelColor({red}, {green}, {blue}))')
+        sonar.setPixelColor(0, Board.PixelColor(red, green, blue))
+        if False and DEBUG: print(f'[flash] sonar.setPixelColor(1, Board.PixelColor({red}, {green}, {blue}))')
+        sonar.setPixelColor(1, Board.PixelColor(red, green, blue))
+        time.sleep(duration)
+
+        # Turn the sonar colors off
+        if False and DEBUG: print(f'[flash] sonar.setPixelColor(0, Board.PixelColor(0, 0, 0))')
+        sonar.setPixelColor(0, Board.PixelColor(0, 0, 0))
+        if False and DEBUG: print(f'[flash] sonar.setPixelColor(1, Board.PixelColor(0, 0, 0))')
+        sonar.setPixelColor(1, Board.PixelColor(0, 0, 0))
+        time.sleep(duration)
+
+# Check if the robot found the goal
+def found_goal():
+    global state_grid
+    global goal_location
+    global current_location
+    if current_location[0] == goal_location[0] and current_location[1] == goal_location[1]:
+        return True
+    return False
+
 # Main routine
 def main():
     global is_running
+    global grid_world
     global state_grid
+    global start_location
+    global goal_location
+    global current_location
+    global south_distance
+    global east_distance
+    global line_count
     if DEBUG: print('[main]')
 
     # Calculate an heuristic that will quickly move the robot towards the goal
@@ -472,22 +526,14 @@ def main():
     pretty_print_2d_characters(state_grid, compass_names)
 
     # Announce the initialization of the robot
-    if DEBUG: print(f'[main] Board.setBuzzer(1)')
-    Board.setBuzzer(1) # Turn on the Buzzer
-    time.sleep(0.1) # Leave the Buzzer on for a short blip
-    if DEBUG: print(f'[main] Board.setBuzzer(0)')
-    Board.setBuzzer(0) # Turn off the Buzzer
+    buzz(duration=0.1)
 
     # Initialize the robot
     initialize()
     signal.signal(signal.SIGINT, stop)
 
     # Announce the start of motion
-    if DEBUG: print(f'[main] Board.setBuzzer(1)')
-    Board.setBuzzer(1) # Turn on the Buzzer
-    time.sleep(1.0) # Leave the Buzzer on for a long blip
-    if DEBUG: print(f'[main] Board.setBuzzer(0)')
-    Board.setBuzzer(0) # Turn off the Buzzer
+    buzz(duration=1.0)
 
     # Start the robot running
     is_running = True
@@ -500,30 +546,66 @@ def main():
     # Collect images while the robot is running
     image_id = 1
     image_filenames = []
-    while is_running:
-        camera_image = camera.frame
-        if camera_image is not None:
-            frame = camera_image.copy() # Copy the image from the camera
-            Frame = run(frame)  
-            frame_resize = cv2.resize(Frame, (320, 240)) # Resize the image down to 320*240
-            cv2.imshow('frame', frame_resize)
-            if GENERATE_MOVIE:
-                image_filename = os.path.join(IMAGES_DIRECTORY, f'{image_id:03d}.jpg')
-                cv2.imwrite(image_filename, frame) # Save the image
-                image_filenames.append(image_filename)
-            image_id += 1
-            key = cv2.waitKey(1)
-            if key == 27:
-                break
-        else:
-            time.sleep(0.01)
 
-    # Announce the stopping of motion
-    if DEBUG: print(f'[main] Board.setBuzzer(1)')
-    Board.setBuzzer(1) # Turn on the Buzzer
-    time.sleep(0.1) # Leave the Buzzer on for a long blip
-    if DEBUG: print(f'[main] Board.setBuzzer(0)')
-    Board.setBuzzer(0) # Turn off the Buzzer
+    # Keep trying until the robot finds the goal
+    while not found_goal():
+        current_location = start_location.copy()
+        south_distance = start_location[0] * NORTH_SOUTH_DISTANCE_PER_STATE
+        east_distance = start_location[1] * EAST_WEST_DISTANCE_PER_STATE
+        line_count = 0
+        is_running = True
+
+        # Turn the sonar colors on - green
+        if DEBUG: print(f'[main] sonar.setPixelColor(0, Board.PixelColor(0, 255, 0))')
+        sonar.setPixelColor(0, Board.PixelColor(0, 255, 0))
+        if DEBUG: print(f'[main] sonar.setPixelColor(1, Board.PixelColor(0, 255, 0))')
+        sonar.setPixelColor(1, Board.PixelColor(0, 255, 0))
+
+        # Manage the robot while it is running
+        while is_running:
+
+            # Capture images from the camera
+            camera_image = camera.frame
+            if camera_image is not None:
+                frame = camera_image.copy() # Copy the image from the camera
+                Frame = run(frame)  
+                frame_resize = cv2.resize(Frame, (320, 240)) # Resize the image down to 320*240
+                cv2.imshow('frame', frame_resize)
+                if GENERATE_MOVIE:
+                    image_filename = os.path.join(IMAGES_DIRECTORY, f'{image_id:03d}.jpg')
+                    cv2.imwrite(image_filename, frame) # Save the image
+                    image_filenames.append(image_filename)
+                image_id += 1
+                key = cv2.waitKey(1)
+                if key == 27:
+                    break
+            else:
+                time.sleep(0.01)
+
+        # Announce the stopping of motion
+        buzz(duration=0.1)
+
+        # Add the newly found barrier and try again
+        if not found_goal():
+            add_barrier = input(f'Add location {current_location} as a new barrier (y/n/c)? ')
+
+            # The user can add the barrier or not and then continue by physically moving the robot back to the starting position
+            if add_barrier == 'y':
+                grid_world[current_location[0]][current_location[1]] = 1
+
+                # Calculate an heuristic that will quickly move the robot towards the goal
+                print('Heuristic World:')
+                heuristic_world = generate_heuristic_world(check_grid_world=True)
+                pretty_print_2d(heuristic_world, True)
+
+                # Generate the motion policy
+                print('Comprehensive Policy Action Grid:')
+                state_grid = generate_comprehensive_policy_grid(heuristic_world)
+                pretty_print_2d_characters(state_grid, compass_names)
+
+            # Check if the user wants to break execution
+            elif add_barrier == 'c':
+                break
 
     # Stop the robot and close the camera windows
     stop()
@@ -538,11 +620,7 @@ def main():
         iio.imwrite(f'{MOVIES_DIRECTORY}/camera_movie.gif', camera_images, loop=0, duration=100) # duration(in ms): `fps=50` == `duration=20` (1000 * 1/50)
 
     # Announce the exit of main
-    if DEBUG: print(f'[main] Board.setBuzzer(1)')
-    Board.setBuzzer(1) # Turn on the Buzzer
-    time.sleep(1.0) # Leave the Buzzer on for a long blip
-    if DEBUG: print(f'[main] Board.setBuzzer(0)')
-    Board.setBuzzer(0) # Turn off the Buzzer
+    buzz(duration=1.0)
 
     # Finish up and exit
     if DEBUG: print('[main] Done.')
