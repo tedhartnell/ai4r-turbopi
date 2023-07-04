@@ -6,6 +6,7 @@ import cv2
 import os
 import shutil
 import time
+from timeit import default_timer as timer
 import math
 import signal
 import Camera
@@ -58,8 +59,10 @@ MIN_SPEED = 50.0 # mm/second - the minimum speed the robot can travel if not sto
 MAX_LINE_COUNT = 8 # stop the robot after detecting this many lines across the track
 LENGTH_OF_ROBOT = 20.0 # cm - the length of the robot
 WIDTH_OF_ROBOT = 16.0 # cm - the width of the robot
-NORTH_SOUTH_DISTANCE_PER_ITERATION = 54.0 / 500 # cm (measured at speed = 50) - the distance traveled by the robot per iteration when traveling forward
-EAST_WEST_DISTANCE_PER_ITERATION = 54.0 / 600 # cm - the distance traveled by the robot per iteration when traveling right
+TIME_TO_TRAVEL_NORTH = 2.5 # seconds (measured at speed = 50) - the measured time it takes to travel the north length of the grid
+TIME_TO_TRAVEL_EAST = 2.7 # seconds (measured at speed = 50) - the measured time it takes to travel the east length of the grid
+NORTH_SOUTH_DISTANCE_PER_SECOND = 54.0 / TIME_TO_TRAVEL_NORTH # cm (measured at speed = 50) - the distance traveled by the robot per iteration when traveling forward
+EAST_WEST_DISTANCE_PER_SECOND = 54.0 / TIME_TO_TRAVEL_EAST # cm - the distance traveled by the robot per iteration when traveling right
 NORTH_SOUTH_DISTANCE_PER_STATE = 27.0 # cm - the distance traveled forward between states
 EAST_WEST_DISTANCE_PER_STATE = 27.0 # cm - the distance traveled right between states
 
@@ -90,8 +93,8 @@ compass_east = 3
 # Grid World Format:
 #   0 = Navigable State
 #   1 = Occupied State
-grid_world   = [[1, 0, 0], # row x column
-                [0, 1, 0],
+grid_world   = [[0, 0, 0], # row x column
+                [0, 0, 0],
                 [0, 0, 0]]
 state_grid   = [[]] # The policy grid filled in by the routine generate_comprehensive_policy_grid()
 
@@ -300,8 +303,11 @@ def move():
 
     # Move the robot according to the plan
     iteration = 0
+    single_stop_iteration = False
     previous_location = None
     direction_name = compass_names[ current_location[2] ]
+    current_time = timer()
+    previous_time = current_time
     while True:
         if is_running and line_count == 0:
             
@@ -324,20 +330,23 @@ def move():
             current_location[2] = state_grid[current_location[0]][current_location[1]]
 
             # Estimate the absolute location (in cm) of the robot
+            current_time = timer()
+            difference_time = current_time - previous_time
             if previous_location != None:
                 # Aggregate the direction traveled
                 if previous_location[2] == compass_north:
-                    south_distance -= NORTH_SOUTH_DISTANCE_PER_ITERATION
+                    south_distance -= NORTH_SOUTH_DISTANCE_PER_SECOND * difference_time
                     current_location[0] = int(south_distance // NORTH_SOUTH_DISTANCE_PER_STATE) + 1
                 if previous_location[2] == compass_west:
-                    east_distance -= EAST_WEST_DISTANCE_PER_ITERATION
+                    east_distance -= EAST_WEST_DISTANCE_PER_SECOND * difference_time
                     current_location[1] = int(east_distance // EAST_WEST_DISTANCE_PER_STATE) + 1
                 if previous_location[2] == compass_south:
+                    south_distance += NORTH_SOUTH_DISTANCE_PER_SECOND * difference_time
                     current_location[0] = int(south_distance // NORTH_SOUTH_DISTANCE_PER_STATE)
-                    south_distance += NORTH_SOUTH_DISTANCE_PER_ITERATION
                 if previous_location[2] == compass_east:
-                    east_distance += EAST_WEST_DISTANCE_PER_ITERATION
+                    east_distance += EAST_WEST_DISTANCE_PER_SECOND * difference_time
                     current_location[1] = int(east_distance // EAST_WEST_DISTANCE_PER_STATE)
+            previous_time = current_time
             previous_location = current_location
 
             # Estimate the state location in the grid_world of the robot
@@ -346,8 +355,12 @@ def move():
             if current_location[1] < 0: current_location[1] = 0
             if current_location[1] > len(grid_world[0]) - 1: current_location[1] = len(grid_world[0]) - 1
             iteration += 1
-        else:
+        elif not single_stop_iteration:
             if DEBUG and line_count > 0: print(f'[move] HIT OUTER-BOUNDARY: iteration,{iteration},south_distance,{south_distance:.1f},east_distance,{east_distance:.1f},current_location,{current_location}: {direction_name} robot.set_velocity({speed:.1f}, {direction_angle}, 0)')
+            is_running = False # The robot should stop immediately if it hits a out-of-bounds black line
+            speed = 0.0
+            single_stop_iteration = True # Only do these things once
+        else:
             is_running = False # The robot should stop immediately if it hits a out-of-bounds black line
             speed = 0.0
         
